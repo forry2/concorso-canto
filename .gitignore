@@ -1,0 +1,19 @@
+# Env con dati reali
+.env.production
+.env.local
+
+# Dati persistenti (uploads + SQLite) - NON committare
+data/
+
+# Node modules
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# Build artifacts
+backend/dist/
+frontend/.next/
+
+# OS
+.DS_Store
+*.log
