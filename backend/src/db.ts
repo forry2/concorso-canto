@@ -19,6 +19,7 @@ db.exec(`
     nome       TEXT NOT NULL DEFAULT '',
     cognome    TEXT NOT NULL DEFAULT '',
     canzone    TEXT NOT NULL DEFAULT '',
+    presentazione TEXT NOT NULL DEFAULT '',
     is_admin   INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -34,7 +35,7 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS uploads (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id       INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
     filename      TEXT NOT NULL,
     original_name TEXT,
     source_type   TEXT NOT NULL CHECK(source_type IN ('file','youtube')),
@@ -42,6 +43,22 @@ db.exec(`
     uploaded_at   TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `);
+
+try {
+  db.exec('ALTER TABLE otp_tokens ADD COLUMN magic_token TEXT');
+} catch {
+  // colonna già presente
+}
+try {
+  db.exec("ALTER TABLE users ADD COLUMN presentazione TEXT NOT NULL DEFAULT ''");
+} catch {
+  // colonna già presente
+}
+try {
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS uploads_user_id_unique ON uploads(user_id)');
+} catch (err) {
+  console.warn('[DB] Indice UNIQUE uploads non creato (possibili duplicati):', err);
+}
 
 // Seed admin iniziale da variabili d'ambiente
 const adminEmail = process.env.ADMIN_EMAIL;

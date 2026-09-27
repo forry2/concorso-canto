@@ -11,6 +11,23 @@ import { upsertUpload, clearUserUploadDir, buildMulterStorage } from './upload';
 const router = Router();
 router.use(requireAdmin);
 
+const MAX_PRESENTAZIONE = 1000;
+
+function readPresentazione(
+  value: unknown,
+  fallback: string
+): { ok: true; text: string } | { ok: false; error: string } {
+  if (value === undefined) return { ok: true, text: fallback };
+  if (typeof value !== 'string') {
+    return { ok: false, error: 'La presentazione non è valida' };
+  }
+  const text = value.trim();
+  if (text.length > MAX_PRESENTAZIONE) {
+    return { ok: false, error: 'La presentazione può avere al massimo 1000 caratteri' };
+  }
+  return { ok: true, text };
+}
+
 // ------------------------------------------------------------------
 // GET /api/admin/users
 // Lista tutti gli utenti con stato upload
@@ -18,14 +35,14 @@ router.use(requireAdmin);
 router.get('/users', (_req: Request, res: Response) => {
   const users = db.prepare(`
     SELECT
-      u.id, u.email, u.nome, u.cognome, u.canzone, u.is_admin, u.created_at,
+      u.id, u.email, u.nome, u.cognome, u.canzone, u.presentazione, u.is_admin, u.created_at,
       up.filename, up.original_name, up.source_type, up.youtube_url, up.uploaded_at
     FROM users u
     LEFT JOIN uploads up ON up.user_id = u.id
     ORDER BY u.cognome ASC, u.nome ASC
   `).all() as Array<{
     id: number; email: string; nome: string; cognome: string; canzone: string;
-    is_admin: number; created_at: string;
+    presentazione: string; is_admin: number; created_at: string;
     filename: string | null; original_name: string | null; source_type: string | null;
     youtube_url: string | null; uploaded_at: string | null;
   }>;
@@ -36,6 +53,7 @@ router.get('/users', (_req: Request, res: Response) => {
     nome: u.nome,
     cognome: u.cognome,
     canzone: u.canzone,
+    presentazione: u.presentazione || '',
     isAdmin: u.is_admin === 1,
     createdAt: u.created_at,
     upload: u.filename
@@ -62,19 +80,26 @@ router.get('/users', (_req: Request, res: Response) => {
 router.post('/users', (req: Request, res: Response) => {
   const { email, nome, cognome, canzone, isAdmin } = req.body;
 
-  if (!email || !nome || !cognome || !canzone) {
-    res.status(400).json({ error: 'Email, nome, cognome e canzone sono obbligatori' });
+  if (!email || typeof email !== 'string' || !email.trim()) {
+    res.status(400).json({ error: "L'email è obbligatoria" });
+    return;
+  }
+
+  const parsed = readPresentazione(req.body?.presentazione, '');
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
     return;
   }
 
   try {
     const result = db.prepare(
-      'INSERT INTO users (email, nome, cognome, canzone, is_admin) VALUES (?, ?, ?, ?, ?)'
+      'INSERT INTO users (email, nome, cognome, canzone, presentazione, is_admin) VALUES (?, ?, ?, ?, ?, ?)'
     ).run(
       email.trim().toLowerCase(),
-      nome.trim(),
-      cognome.trim(),
-      canzone.trim(),
+      typeof nome === 'string' ? nome.trim() : '',
+      typeof cognome === 'string' ? cognome.trim() : '',
+      typeof canzone === 'string' ? canzone.trim() : '',
+      parsed.text,
       isAdmin ? 1 : 0
     );
 
@@ -92,26 +117,53 @@ router.post('/users', (req: Request, res: Response) => {
 // ------------------------------------------------------------------
 // PUT /api/admin/users/:id — Modifica un utente esistente
 // ------------------------------------------------------------------
+function adminCountExcept(id: number): number {
+  const row = db
+    .prepare('SELECT COUNT(*) AS n FROM users WHERE is_admin = 1 AND id != ?')
+    .get(id) as { n: number };
+  return row.n;
+}
+
 router.put('/users/:id', (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   const { email, nome, cognome, canzone, isAdmin } = req.body;
 
-  const existing = db.prepare('SELECT id FROM users WHERE id = ?').get(id);
+  const existing = db.prepare('SELECT id, is_admin FROM users WHERE id = ?').get(id) as
+    | { id: number; is_admin: number }
+    | undefined;
   if (!existing) {
     res.status(404).json({ error: 'Utente non trovato' });
+    return;
+  }
+
+  if (existing.is_admin && !isAdmin && adminCountExcept(id) === 0) {
+    res.status(400).json({ error: 'Deve restare almeno un amministratore' });
+    return;
+  }
+
+  if (!email || typeof email !== 'string' || !email.trim()) {
+    res.status(400).json({ error: "L'email è obbligatoria" });
+    return;
+  }
+
+  const current = db.prepare('SELECT presentazione FROM users WHERE id = ?').get(id) as { presentazione: string };
+  const parsed = readPresentazione(req.body?.presentazione, current.presentazione || '');
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
     return;
   }
 
   try {
     db.prepare(`
       UPDATE users
-      SET email = ?, nome = ?, cognome = ?, canzone = ?, is_admin = ?
+      SET email = ?, nome = ?, cognome = ?, canzone = ?, presentazione = ?, is_admin = ?
       WHERE id = ?
     `).run(
-      email?.trim().toLowerCase(),
-      nome?.trim(),
-      cognome?.trim(),
-      canzone?.trim(),
+      email.trim().toLowerCase(),
+      typeof nome === 'string' ? nome.trim() : '',
+      typeof cognome === 'string' ? cognome.trim() : '',
+      typeof canzone === 'string' ? canzone.trim() : '',
+      parsed.text,
       isAdmin ? 1 : 0,
       id
     );
@@ -133,9 +185,21 @@ router.put('/users/:id', (req: Request, res: Response) => {
 router.delete('/users/:id', (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
 
-  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(id);
+  if (req.user!.userId === id) {
+    res.status(400).json({ error: 'Non puoi eliminare il tuo account' });
+    return;
+  }
+
+  const user = db.prepare('SELECT id, is_admin FROM users WHERE id = ?').get(id) as
+    | { id: number; is_admin: number }
+    | undefined;
   if (!user) {
     res.status(404).json({ error: 'Utente non trovato' });
+    return;
+  }
+
+  if (user.is_admin && adminCountExcept(id) === 0) {
+    res.status(400).json({ error: 'Deve restare almeno un amministratore' });
     return;
   }
 
@@ -152,6 +216,24 @@ router.delete('/users/:id', (req: Request, res: Response) => {
   db.prepare('DELETE FROM users WHERE id = ?').run(id);
 
   res.json({ message: 'Utente eliminato' });
+});
+
+// ------------------------------------------------------------------
+// DELETE /api/admin/users/:id/upload — Cancella solo la base caricata
+// ------------------------------------------------------------------
+router.delete('/users/:id/upload', (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  const user = db.prepare('SELECT id FROM users WHERE id = ?').get(id);
+  if (!user) {
+    res.status(404).json({ error: 'Utente non trovato' });
+    return;
+  }
+
+  cancelYtdlpJob(id);
+  clearUserUploadDir(id);
+  db.prepare('DELETE FROM uploads WHERE user_id = ?').run(id);
+
+  res.json({ message: 'Base cancellata' });
 });
 
 // ------------------------------------------------------------------
@@ -190,7 +272,7 @@ router.get('/download-all', async (req: Request, res: Response) => {
 
   for (const u of usersWithFiles) {
     const filePath = path.join(DATA_DIR, 'uploads', String(u.id), u.filename);
-    const safeName = `${u.cognome}_${u.nome}_${u.canzone}`
+    const safeName = [u.cognome, u.nome, u.canzone].filter((part) => part && part.trim()).join('_')
       .replace(/[^a-zA-Z0-9\u00C0-\u024F\u1E00-\u1EFF_ -]/g, '')
       .replace(/\s+/g, '_')
       .slice(0, 80);

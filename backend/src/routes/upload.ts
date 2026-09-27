@@ -72,6 +72,32 @@ function buildMulterStorage(getTargetUserId: (req: Request) => number) {
   });
 }
 
+const MAX_PRESENTAZIONE = 1000;
+
+function readPresentazione(value: unknown): { ok: true; text: string } | { ok: false; error: string } {
+  if (typeof value !== 'string') {
+    return { ok: false, error: 'La presentazione non è valida' };
+  }
+  const text = value.trim();
+  if (text.length > MAX_PRESENTAZIONE) {
+    return { ok: false, error: 'La presentazione può avere al massimo 1000 caratteri' };
+  }
+  return { ok: true, text };
+}
+
+function assertSingerProfile(userId: number, res: Response): boolean {
+  const profile = db.prepare('SELECT nome, cognome, canzone FROM users WHERE id = ?').get(userId) as
+    | { nome: string; cognome: string; canzone: string }
+    | undefined;
+  if (!profile?.nome.trim() || !profile.cognome.trim() || !profile.canzone.trim()) {
+    res.status(400).json({
+      error: 'Prima di caricare la base inserisci nome, cognome e titolo della canzone',
+    });
+    return false;
+  }
+  return true;
+}
+
 // ------------------------------------------------------------------
 // POST /api/upload  — upload file (utente carica la propria base)
 // ------------------------------------------------------------------
@@ -79,6 +105,13 @@ const selfUpload = buildMulterStorage((req) => req.user!.userId);
 
 router.post('/', selfUpload.single('file'), async (req: Request, res: Response) => {
   const userId = req.user!.userId;
+
+  if (!assertSingerProfile(userId, res)) {
+    if (req.file) {
+      try { fs.unlinkSync(req.file.path); } catch { /* ignora */ }
+    }
+    return;
+  }
 
   // --- Caso 1: link YouTube ---
   if (req.body?.youtubeUrl) {
@@ -155,6 +188,45 @@ router.post('/', selfUpload.single('file'), async (req: Request, res: Response) 
     filename: `base${ext}`,
     mime: check.mime,
   });
+});
+
+// ------------------------------------------------------------------
+// PUT /api/upload/profilo — il cantante salva nome, cognome e titolo
+// ------------------------------------------------------------------
+router.put('/profilo', (req: Request, res: Response) => {
+  const nome = typeof req.body?.nome === 'string' ? req.body.nome.trim() : '';
+  const cognome = typeof req.body?.cognome === 'string' ? req.body.cognome.trim() : '';
+  const canzone = typeof req.body?.canzone === 'string' ? req.body.canzone.trim() : '';
+  if (!nome || !cognome || !canzone) {
+    res.status(400).json({ error: 'Nome, cognome e titolo della canzone sono obbligatori' });
+    return;
+  }
+  const parsed = readPresentazione(req.body?.presentazione ?? '');
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  db.prepare('UPDATE users SET nome = ?, cognome = ?, canzone = ?, presentazione = ? WHERE id = ?').run(
+    nome,
+    cognome,
+    canzone,
+    parsed.text,
+    req.user!.userId
+  );
+  res.json({ nome, cognome, canzone, presentazione: parsed.text });
+});
+
+// ------------------------------------------------------------------
+// PUT /api/upload/canzone — compatibilità: stesso controllo del profilo
+// ------------------------------------------------------------------
+router.put('/canzone', (req: Request, res: Response) => {
+  const canzone = typeof req.body?.canzone === 'string' ? req.body.canzone.trim() : '';
+  if (!canzone) {
+    res.status(400).json({ error: 'Il titolo della canzone è obbligatorio' });
+    return;
+  }
+  db.prepare('UPDATE users SET canzone = ? WHERE id = ?').run(canzone, req.user!.userId);
+  res.json({ canzone });
 });
 
 // ------------------------------------------------------------------

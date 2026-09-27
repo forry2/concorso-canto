@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import db from '../db';
-import { generateOtp, saveOtp, validateOtp } from '../services/otp';
+import { generateOtp, saveOtp, validateOtp, consumeMagicToken } from '../services/otp';
 import { sendOtpEmail } from '../services/email';
 import { signToken } from '../middleware/auth';
 import { requireAuth } from '../middleware/auth';
@@ -9,7 +9,7 @@ const router = Router();
 
 // Messaggio generico anti-email-enumeration
 const OTP_RESPONSE_MESSAGE =
-  "Se l'email è registrata, riceverai a breve un codice OTP valido per 1 minuto.";
+  "Se l'email è registrata, riceverai a breve un codice OTP e un link per entrare, validi per 3 minuti.";
 
 /**
  * POST /api/auth/request-otp
@@ -33,8 +33,8 @@ router.post('/request-otp', async (req: Request, res: Response) => {
   if (user) {
     try {
       const otp = generateOtp();
-      saveOtp(normalizedEmail, otp);
-      await sendOtpEmail(user.email, otp);
+      const magicToken = saveOtp(normalizedEmail, otp);
+      await sendOtpEmail(user.email, otp, magicToken);
       console.log(`[Auth] OTP inviato a ${normalizedEmail}`);
     } catch (err) {
       console.error('[Auth] Errore invio OTP:', err);
@@ -63,19 +63,20 @@ router.post('/verify-otp', (req: Request, res: Response) => {
   const normalizedEmail = email.trim().toLowerCase();
 
   const user = db.prepare(
-    'SELECT id, email, nome, cognome, canzone, is_admin FROM users WHERE email = ?'
+    'SELECT id, email, nome, cognome, canzone, presentazione, is_admin FROM users WHERE email = ?'
   ).get(normalizedEmail) as
-    | { id: number; email: string; nome: string; cognome: string; canzone: string; is_admin: number }
+    | { id: number; email: string; nome: string; cognome: string; canzone: string; presentazione: string; is_admin: number }
     | undefined;
 
   if (!user) {
+    // Messaggio identico al fallimento OTP (anti-enumeration)
     res.status(401).json({ error: 'Credenziali non valide' });
     return;
   }
 
   const valid = validateOtp(normalizedEmail, otp.trim());
   if (!valid) {
-    res.status(401).json({ error: 'Codice OTP non valido o scaduto' });
+    res.status(401).json({ error: 'Credenziali non valide' });
     return;
   }
 
@@ -93,6 +94,55 @@ router.post('/verify-otp', (req: Request, res: Response) => {
       nome: user.nome,
       cognome: user.cognome,
       canzone: user.canzone,
+      presentazione: user.presentazione || '',
+      isAdmin: user.is_admin === 1,
+    },
+  });
+});
+
+/**
+ * POST /api/auth/magic
+ * Consuma il link monouso dell'email e restituisce un JWT.
+ */
+router.post('/magic', (req: Request, res: Response) => {
+  const magicToken = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+  if (!magicToken) {
+    res.status(400).json({ error: 'Link non valido' });
+    return;
+  }
+
+  const email = consumeMagicToken(magicToken);
+  if (!email) {
+    res.status(401).json({ error: 'Link non valido o scaduto' });
+    return;
+  }
+
+  const user = db.prepare(
+    'SELECT id, email, nome, cognome, canzone, presentazione, is_admin FROM users WHERE email = ?'
+  ).get(email) as
+    | { id: number; email: string; nome: string; cognome: string; canzone: string; presentazione: string; is_admin: number }
+    | undefined;
+
+  if (!user) {
+    res.status(401).json({ error: 'Link non valido o scaduto' });
+    return;
+  }
+
+  const token = signToken({
+    userId: user.id,
+    email: user.email,
+    isAdmin: user.is_admin === 1,
+  });
+
+  res.json({
+    token,
+    user: {
+      id: user.id,
+      email: user.email,
+      nome: user.nome,
+      cognome: user.cognome,
+      canzone: user.canzone,
+      presentazione: user.presentazione || '',
       isAdmin: user.is_admin === 1,
     },
   });
@@ -104,9 +154,9 @@ router.post('/verify-otp', (req: Request, res: Response) => {
  */
 router.get('/me', requireAuth, (req: Request, res: Response) => {
   const user = db.prepare(
-    'SELECT id, email, nome, cognome, canzone, is_admin FROM users WHERE id = ?'
+    'SELECT id, email, nome, cognome, canzone, presentazione, is_admin FROM users WHERE id = ?'
   ).get(req.user!.userId) as
-    | { id: number; email: string; nome: string; cognome: string; canzone: string; is_admin: number }
+    | { id: number; email: string; nome: string; cognome: string; canzone: string; presentazione: string; is_admin: number }
     | undefined;
 
   if (!user) {
@@ -120,6 +170,7 @@ router.get('/me', requireAuth, (req: Request, res: Response) => {
     nome: user.nome,
     cognome: user.cognome,
     canzone: user.canzone,
+    presentazione: user.presentazione || '',
     isAdmin: user.is_admin === 1,
   });
 });

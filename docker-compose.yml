@@ -1,22 +1,12 @@
-version: '3.8'
-
-# Architettura sul Raspberry Pi:
-#
-#   Internet → nginx host (porta 443, SSL, vhost: inoutcontest.robybrown.duckdns.org)
-#                  ↓ HTTP proxy
-#              container: frontend (Next.js, porta 3001)
-#                  ↓ chiamate interne Docker
-#              container: backend (Express, porta 4000 - non esposta all'esterno)
-#                  ↓ (filesystem)
-#              volume: ./data/ (SQLite + uploads)
-#
-# nginx host punta a localhost:3001 per questo vhost.
+# syntax=docker/dockerfile:1
 
 services:
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        BACKEND_URL: http://backend:4000
     ports:
       - "3001:3000"
     environment:
